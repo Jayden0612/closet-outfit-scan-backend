@@ -54,7 +54,6 @@ OUTERWEAR_CENTER_Y_MAX: float = 0.85
 class ClothingRegion(BaseModel):
     id: str
     category: str
-    label: str = ""
     confidence: float
     x: float
     y: float
@@ -85,7 +84,6 @@ Identify each individual clothing item that is clearly visible (jacket, jeans, s
 
 For each item return a JSON object with:
 - "category": one of exactly these values: "top", "bottom", "shoes", "outerwear"
-- "label": short human-readable garment name (e.g. "Denim jacket", "Black cargo pants", "White sneakers")
 - "confidence": float 0-1
 - "x", "y", "width", "height": normalized 0-1 bounding box (x=left, y=top)
 
@@ -94,15 +92,15 @@ Rules:
 - Each box must tightly wrap just that garment.
 - For "top": box the shirt/hoodie/jacket torso area (roughly y=0.1 to y=0.5)
 - For "bottom": box the pants/jeans area (roughly y=0.45 to y=0.85)  
-- For "shoes": box the feet and ankle area (roughly y=0.72 to y=1.0), make sure the full shoe is included including the top of the shoe
+- For "shoes": box only the feet/footwear area (roughly y=0.8 to y=1.0)
 - If unsure, omit the item rather than guess.
 
 Output JSON only (no markdown):
 {
   "items": [
-    {"category": "top", "label": "Denim jacket", "confidence": 0.92, "x": 0.15, "y": 0.12, "width": 0.65, "height": 0.35},
-    {"category": "bottom", "label": "Black cargo pants", "confidence": 0.88, "x": 0.2, "y": 0.48, "width": 0.55, "height": 0.35},
-    {"category": "shoes", "label": "White sneakers", "confidence": 0.85, "x": 0.25, "y": 0.84, "width": 0.45, "height": 0.14}
+    {"category": "top", "confidence": 0.92, "x": 0.15, "y": 0.12, "width": 0.65, "height": 0.35},
+    {"category": "bottom", "confidence": 0.88, "x": 0.2, "y": 0.48, "width": 0.55, "height": 0.35},
+    {"category": "shoes", "confidence": 0.85, "x": 0.25, "y": 0.84, "width": 0.45, "height": 0.14}
   ]
 }
 """
@@ -112,7 +110,7 @@ def _call_model(image_bytes: bytes) -> List[dict]:
     if _openai_client is None or not os.getenv("OPENAI_API_KEY"):
         print("[OutfitScanBackend] WARNING: No API key found, returning mock data")
         return [
-            {"category": "top", "label": "Top", "confidence": 0.9, "x": 0.15, "y": 0.12, "width": 0.65, "height": 0.35},
+            {"category": "top", "confidence": 0.9, "x": 0.15, "y": 0.12, "width": 0.65, "height": 0.35},
         ]
 
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -154,22 +152,7 @@ def _call_model(image_bytes: bytes) -> List[dict]:
     try:
         parsed = json.loads(raw_content or "{}")
         items = parsed.get("items", [])
-        if not isinstance(items, list):
-            return []
-        passthrough = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            passthrough.append({
-                "category": item.get("category", ""),
-                "label": str(item.get("label", "") or ""),
-                "confidence": item.get("confidence", 0.0),
-                "x": item.get("x", 0.0),
-                "y": item.get("y", 0.0),
-                "width": item.get("width", 0.0),
-                "height": item.get("height", 0.0),
-            })
-        return passthrough
+        return items if isinstance(items, list) else []
     except Exception as e:
         print(f"[OutfitScanBackend] Failed to parse model JSON: {e}")
         return []
@@ -213,7 +196,7 @@ def _detect_person_and_crop(image_bytes: bytes) -> Optional[Tuple[bytes, float, 
         return None
 
 
-def _parse_raw_item(item: dict) -> Optional[Tuple[str, float, float, float, float, float, str]]:
+def _parse_raw_item(item: dict) -> Optional[Tuple[str, float, float, float, float, float]]:
     try:
         category = str(item.get("category", "")).strip().lower()
         confidence = float(item.get("confidence", 0.0))
@@ -228,7 +211,7 @@ def _parse_raw_item(item: dict) -> Optional[Tuple[str, float, float, float, floa
             h = float(item.get("height", 0))
         if not (0.0 <= x < 1.0 and 0.0 <= y < 1.0 and w > 0 and h > 0 and x + w <= 1.0 + 1e-3 and y + h <= 1.0 + 1e-3):
             return None
-        return (category, confidence, x, y, w, h, item.get("label", ""))
+        return (category, confidence, x, y, w, h)
     except (TypeError, ValueError):
         return None
 
@@ -253,7 +236,7 @@ def _iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float, flo
 
 def _filter_and_validate_items(raw_items: List[dict]) -> Tuple[List[ClothingRegion], List[str]]:
     log_lines: List[str] = []
-    candidates: List[Tuple[str, float, float, float, float, float, str]] = []
+    candidates: List[Tuple[str, float, float, float, float, float]] = []
     seen_key: set = set()
 
     for i, item in enumerate(raw_items):
@@ -261,7 +244,7 @@ def _filter_and_validate_items(raw_items: List[dict]) -> Tuple[List[ClothingRegi
         if parsed is None:
             log_lines.append(f"item {i}: rejected: invalid bbox or parse error")
             continue
-        category, confidence, x, y, w, h, label = parsed
+        category, confidence, x, y, w, h = parsed
         if category not in ALLOWED_CATEGORIES:
             log_lines.append(f"item {i} ({category!r}): rejected: category not allowed")
             continue
@@ -273,12 +256,12 @@ def _filter_and_validate_items(raw_items: List[dict]) -> Tuple[List[ClothingRegi
             log_lines.append(f"item {i} ({category}): rejected: duplicate")
             continue
         seen_key.add(key)
-        candidates.append((category, confidence, x, y, w, h, label))
+        candidates.append((category, confidence, x, y, w, h))
 
-    step2 = [(c, cf, x, y, w, h, l) for c, cf, x, y, w, h, l in candidates if w * h <= MAX_BOX_AREA]
+    step2 = [(c, cf, x, y, w, h) for c, cf, x, y, w, h in candidates if w * h <= MAX_BOX_AREA]
 
-    step3: List[Tuple[str, float, float, float, float, float, str]] = []
-    for cat, conf, x, y, w, h, label in step2:
+    step3: List[Tuple[str, float, float, float, float, float]] = []
+    for cat, conf, x, y, w, h in step2:
         center_y = y + h / 2
         if cat == "top" and center_y > TOP_CENTER_Y_MAX:
             log_lines.append(f"{cat}: rejected: center_y {center_y:.2f} too low for top")
@@ -289,21 +272,21 @@ def _filter_and_validate_items(raw_items: List[dict]) -> Tuple[List[ClothingRegi
         if cat == "shoes" and center_y < SHOES_CENTER_Y_MIN:
             log_lines.append(f"{cat}: rejected: center_y {center_y:.2f} too high for shoes")
             continue
-        step3.append((cat, conf, x, y, w, h, label))
+        step3.append((cat, conf, x, y, w, h))
 
-    step4 = [(c, cf, x, y, w, h, l) for c, cf, x, y, w, h, l in step3 if w * h >= MIN_BOX_AREA]
+    step4 = [(c, cf, x, y, w, h) for c, cf, x, y, w, h in step3 if w * h >= MIN_BOX_AREA]
 
     step4_sorted = sorted(step4, key=lambda t: -t[1])
-    kept: List[Tuple[str, float, float, float, float, float, str]] = []
-    for cat, conf, x, y, w, h, label in step4_sorted:
+    kept: List[Tuple[str, float, float, float, float, float]] = []
+    for cat, conf, x, y, w, h in step4_sorted:
         box = (x, y, w, h)
-        overlaps = any(_iou(box, (kx, ky, kw, kh)) > OVERLAP_THRESHOLD for _, _, kx, ky, kw, kh, _ in kept)
+        overlaps = any(_iou(box, (kx, ky, kw, kh)) > OVERLAP_THRESHOLD for _, _, kx, ky, kw, kh in kept)
         if not overlaps:
-            kept.append((cat, conf, x, y, w, h, label))
+            kept.append((cat, conf, x, y, w, h))
 
     regions = [
-        ClothingRegion(id=str(uuid.uuid4()), category=cat, label=label, confidence=conf, x=x, y=y, width=w, height=h)
-        for cat, conf, x, y, w, h, label in kept
+        ClothingRegion(id=str(uuid.uuid4()), category=cat, confidence=conf, x=x, y=y, width=w, height=h)
+        for cat, conf, x, y, w, h in kept
     ]
     return regions, log_lines
 
@@ -330,8 +313,8 @@ async def scan_outfit(
                 p = _parse_raw_item(item)
                 if p is None:
                     continue
-                cat, conf, cx, cy, cw, ch, label = p
-                mapped.append({"category": cat, "label": label, "confidence": conf,
+                cat, conf, cx, cy, cw, ch = p
+                mapped.append({"category": cat, "confidence": conf,
                                 "x": px + cx * pw, "y": py + cy * ph,
                                 "width": cw * pw, "height": ch * ph})
             raw_items = mapped
@@ -341,7 +324,6 @@ async def scan_outfit(
         raw_items = _call_model(image_bytes)
 
     print(f"[OutfitScan] raw model output: {json.dumps(raw_items, indent=2)}")
-    print(f"[OutfitScan] raw items with labels: {[(i.get('category'), i.get('label', 'NO LABEL')) for i in raw_items]}")
 
     cleaned_items, rejection_log = _filter_and_validate_items(raw_items)
     for line in rejection_log:
