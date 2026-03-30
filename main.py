@@ -258,25 +258,27 @@ def _call_detect_price_model(image_bytes: bytes, brand: str, category: str, name
     }
 
 
-_DETECT_ITEM_SYSTEM = """You are a fashion item recognition assistant. Given an image of a clothing item, identify the following and return ONLY raw JSON with no markdown:
+_DETECT_ITEM_SYSTEM = """You are a fashion retail pricing expert with deep knowledge of clothing brands and their current retail prices.
+
+Given an image of a clothing item, identify it as precisely as possible and return ONLY raw JSON with no markdown:
 {
-  "brand": "Nike",
-  "color": "Black",
+  "brand": "Rusty",
+  "color": "Navy",
   "category": "top",
-  "price": 89.99,
+  "price": 49.99,
   "confidence": "high",
-  "source": "nike.com"
+  "source": "rusty.com"
 }
 
 Rules:
-- brand: the brand name as it appears on the item, or null if not visible
-- color: the primary color as a simple word (e.g. "Black", "Navy", "Cream"), never null — always guess
+- brand: exact brand name as shown on the item (logo, tag, text), or null if not visible
+- color: primary color as a simple word ("Black", "Navy", "White", "Cream", "Olive", etc.), never null
 - category: one of exactly: "top", "bottom", "shoes", "outerwear", "accessory" — never null
-- price: typical retail price in USD as a number, or null if truly unknown
-- confidence: "high" if brand and price are clearly identifiable, "medium" if estimated, "low" if mostly guessing
-- source: retailer or brand website if known (e.g. "nike.com"), "estimated" if guessed, null if unknown
+- price: the CURRENT retail price in USD from the brand's official website or major retailer (e.g. ASOS, Nordstrom, SSENSE). Be as precise as possible — do not round to nearest $10. If the brand is visible, use your knowledge of that brand's actual price range for that garment type. A graphic tee from a surf brand is typically $35-55. A basic tee from H&M is $10-20. A Nike hoodie is $55-75. Match the specific garment type and brand tier carefully.
+- confidence: "high" if you can identify the specific brand AND garment type with certainty, "medium" if brand is visible but exact style is unclear, "low" if guessing
+- source: brand's website domain if known (e.g. "rusty.com"), "estimated" if using brand knowledge, null if unknown
 
-Always return all six keys. Never return markdown or explanation."""
+Always return all six keys. Never return markdown or explanation. Prioritize accuracy over confidence — it is better to return a precise price with medium confidence than a rounded guess with high confidence."""
 
 _DETECT_ITEM_ALLOWED_CATEGORIES = frozenset({"top", "bottom", "shoes", "outerwear", "accessory"})
 
