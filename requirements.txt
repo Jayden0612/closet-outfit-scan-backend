@@ -4,4 +4,4 @@ python-multipart
 openai
 python-dotenv
 opencv-python-headless
-slowapi
+slowapi>=0.1.9
