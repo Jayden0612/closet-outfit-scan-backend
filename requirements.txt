@@ -5,3 +5,4 @@ openai
 python-dotenv
 opencv-python-headless
 slowapi>=0.1.9
+firebase-admin>=6.5.0

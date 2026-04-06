@@ -39,6 +39,8 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from verify_subscription import router as subscription_router
+from promo_routes import router as promo_router
+from feedback_routes import router as feedback_router
 
 try:
     from openai import OpenAI
@@ -383,6 +385,8 @@ app = FastAPI(title="Outfit Scan API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(subscription_router)
+app.include_router(promo_router)
+app.include_router(feedback_router)
 
 _cors = _cors_origins()
 app.add_middleware(
