@@ -786,6 +786,75 @@ async def scan_outfit(
     return ScanOutfitResponse(scanId=str(uuid.uuid4()), items=cleaned_items)
 
 
+# --- Wishlist AI Take ---
+
+class WishlistAITakeWardrobeItem(BaseModel):
+    name: str = Field(default="", max_length=300)
+    category: str = Field(default="", max_length=64)
+    color: str = Field(default="", max_length=120)
+    brand: str = Field(default="", max_length=200)
+
+
+class WishlistAITakeRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    itemName: str = Field(..., max_length=300)
+    brand: str = Field(default="", max_length=200)
+    price: Optional[float] = None
+    cooldownDate: Optional[str] = None
+    wardrobe: List[WishlistAITakeWardrobeItem] = []
+
+
+class WishlistAITakeResponse(BaseModel):
+    aiTake: str
+
+
+_WISHLIST_AI_TAKE_SYSTEM = """You are a concise personal stylist giving honest buy-or-wait advice. Given a wishlist item and the user's existing wardrobe, respond in three flowing sentences with no headers or bullet points:
+1. A direct buy or wait recommendation and why (be honest, not just encouraging).
+2. If a price is provided, estimate cost-per-wear at 20, 30, and 50 wears (e.g. "$4, $2.67, $2 per wear").
+3. Name 2-3 specific wardrobe items this pairs well with, or note if nothing matches well.
+Keep the total response under 80 words."""
+
+
+@app.post("/wishlist-ai-take", response_model=WishlistAITakeResponse)
+@limiter.limit(RATE_LIMIT_IP, key_func=_rate_limit_key_ip)
+@limiter.limit(RATE_LIMIT_USER, key_func=_rate_limit_key_user_or_anon)
+async def wishlist_ai_take(request: Request, body: WishlistAITakeRequest) -> WishlistAITakeResponse:
+    client = _get_openai_client()
+    if client is None:
+        return WishlistAITakeResponse(aiTake="AI unavailable — missing API key.")
+
+    wardrobe_lines = "\n".join(
+        f"- {w.name} ({w.category}, {w.color}, {w.brand})" for w in body.wardrobe[:50]
+    ) or "No wardrobe items provided."
+
+    price_line = f"Price: ${body.price:.2f}" if body.price is not None else "Price: not provided"
+    cooldown_line = f"Cool-down date: {body.cooldownDate}" if body.cooldownDate else ""
+
+    user_message = f"""Wishlist item: {body.itemName}
+Brand: {body.brand or "unknown"}
+{price_line}
+{cooldown_line}
+
+User's wardrobe:
+{wardrobe_lines}"""
+
+    try:
+        completion = client.chat.completions.create(
+            model=os.getenv("OUTFIT_SCAN_MODEL", "gpt-4o"),
+            messages=[
+                {"role": "system", "content": _WISHLIST_AI_TAKE_SYSTEM},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens=160,
+            temperature=0.7,
+        )
+        result = (completion.choices[0].message.content or "").strip()
+        return WishlistAITakeResponse(aiTake=result if result else "No take available.")
+    except Exception as e:
+        print(f"[WishlistAITake] OpenAI error: {e}")
+        return WishlistAITakeResponse(aiTake="Couldn't generate a take right now. Try again shortly.")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
