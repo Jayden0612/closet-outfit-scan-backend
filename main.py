@@ -955,32 +955,33 @@ async def style_search(request: StyleSearchRequest):
             item_label = vision_response.choices[0].message.content.strip()
 
         search_query = f"{item_label} outfit ideas how to style"
-        api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+        api_key = os.environ.get("SERPAPI_KEY", "").strip()
 
         if not api_key:
-            raise HTTPException(status_code=500, detail="GOOGLE_API_KEY is not configured")
+            raise HTTPException(status_code=500, detail="SERPAPI_KEY is not configured")
 
         params = {
-            "key": api_key,
-            "cx": "b3e616581d8204cad",
-            "searchType": "image",
+            "engine": "google_images",
             "q": search_query,
+            "api_key": api_key,
             "num": 20,
-            "safe": "active"
+            "safe": "active",
+            "gl": "us",
+            "hl": "en"
         }
 
-        google_response = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
+        serp_response = requests.get(
+            "https://serpapi.com/search",
             params=params
         )
-        google_response.raise_for_status()
-        data = google_response.json()
+        serp_response.raise_for_status()
+        data = serp_response.json()
 
         results = []
-        for item in data.get("items", []):
+        for item in data.get("images_results", []):
             results.append({
-                "image_url": item.get("link", ""),
-                "source_url": item.get("image", {}).get("contextLink", ""),
+                "image_url": item.get("original", item.get("thumbnail", "")),
+                "source_url": item.get("link", ""),
                 "title": item.get("title", ""),
                 "item_identified": item_label
             })
