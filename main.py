@@ -39,8 +39,6 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from verify_subscription import router as subscription_router
-from promo_routes import router as promo_router
-from feedback_routes import router as feedback_router
 
 try:
     from openai import OpenAI
@@ -385,8 +383,6 @@ app = FastAPI(title="Outfit Scan API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(subscription_router)
-app.include_router(promo_router)
-app.include_router(feedback_router)
 
 _cors = _cors_origins()
 app.add_middleware(
@@ -853,6 +849,65 @@ User's wardrobe:
     except Exception as e:
         print(f"[WishlistAITake] OpenAI error: {e}")
         return WishlistAITakeResponse(aiTake="Couldn't generate a take right now. Try again shortly.")
+
+
+# --- Wishlist estimate price ---
+
+_WISHLIST_ESTIMATE_PRICE_SYSTEM = (
+    'You are a retail pricing assistant. Given a product title, store name, and URL, estimate the '
+    "current retail price in USD as precisely as possible. Use your knowledge of the brand's typical "
+    'price range for that product type. Return ONLY raw JSON with no markdown: { "price": 49.99 } or '
+    '{ "price": null } if you cannot estimate.'
+)
+
+
+class WishlistEstimatePriceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    title: str = Field(..., max_length=500)
+    store: str = Field(default="", max_length=200)
+    url: str = Field(..., max_length=2000)
+
+
+class WishlistEstimatePriceResponse(BaseModel):
+    price: Optional[float] = None
+
+
+@app.post("/wishlist-estimate-price", response_model=WishlistEstimatePriceResponse)
+@limiter.limit(RATE_LIMIT_IP, key_func=_rate_limit_key_ip)
+@limiter.limit(RATE_LIMIT_USER, key_func=_rate_limit_key_user_or_anon)
+async def wishlist_estimate_price(
+    request: Request, body: WishlistEstimatePriceRequest
+) -> WishlistEstimatePriceResponse:
+    client = _get_openai_client()
+    if client is None:
+        return WishlistEstimatePriceResponse(price=None)
+
+    user_message = f"title: {body.title}\nstore: {body.store}\nurl: {body.url}"
+
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": _WISHLIST_ESTIMATE_PRICE_SYSTEM},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens=80,
+            temperature=0.3,
+        )
+        raw = (completion.choices[0].message.content or "").strip()
+        d = json.loads(raw)
+        if not isinstance(d, dict):
+            return WishlistEstimatePriceResponse(price=None)
+        p = d.get("price")
+        if p is None:
+            return WishlistEstimatePriceResponse(price=None)
+        if isinstance(p, (int, float)):
+            return WishlistEstimatePriceResponse(price=float(p))
+        return WishlistEstimatePriceResponse(price=None)
+    except Exception as e:
+        print(f"[WishlistEstimatePrice] error: {e}")
+        return WishlistEstimatePriceResponse(price=None)
 
 
 if __name__ == "__main__":
