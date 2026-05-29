@@ -931,18 +931,17 @@ async def style_search(request: StyleSearchRequest):
             if "," in image_data:
                 image_data = image_data.split(",")[1]
 
-            vision_response = anthropic_client.messages.create(
-                model="claude-sonnet-4-20250514",
+            client = _get_openai_client()
+            vision_response = client.chat.completions.create(
+                model="gpt-4o",
                 max_tokens=100,
                 messages=[{
                     "role": "user",
                     "content": [
                         {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_data
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_data}"
                             }
                         },
                         {
@@ -952,7 +951,7 @@ async def style_search(request: StyleSearchRequest):
                     ]
                 }]
             )
-            item_label = vision_response.content[0].text.strip()
+            item_label = vision_response.choices[0].message.content.strip()
 
         search_query = f"{item_label} outfit ideas how to style"
         api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
