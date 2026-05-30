@@ -347,8 +347,28 @@ def _call_detect_item_model(image_bytes: bytes) -> dict:
     category: Optional[str] = None
     if cat_raw is not None:
         c = str(cat_raw).strip().lower()
-        if c in _DETECT_ITEM_ALLOWED_CATEGORIES:
-            category = c
+        _CATEGORY_SYNONYMS = {
+    "top": ["top", "shirt", "tshirt", "t-shirt", "blouse", "sweater", "hoodie", "tank", "polo", "tee"],
+    "bottom": ["bottom", "pants", "jeans", "shorts", "skirt", "trousers", "leggings", "chinos", "slacks"],
+    "shoes": ["shoes", "sneakers", "boots", "heels", "sandals", "footwear", "loafers", "flats", "trainers"],
+    "outerwear": ["outerwear", "coat", "jacket", "blazer", "parka", "raincoat", "windbreaker", "cardigan"],
+    "accessory": ["accessory", "accessories", "bag", "hat", "belt", "watch", "scarf", "sunglasses", "purse"],
+}
+
+def _normalize_category(raw):
+    if not raw:
+        return None
+    raw = raw.lower().strip()
+    for parent, synonyms in _CATEGORY_SYNONYMS.items():
+        if raw in synonyms:
+            return parent
+    return None
+
+normalized = _normalize_category(c)
+if normalized:
+    category = normalized
+elif c in _DETECT_ITEM_ALLOWED_CATEGORIES:
+    category = c
 
     brand_raw = parsed.get("brand")
     brand: Optional[str] = None
