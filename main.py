@@ -364,10 +364,7 @@ def _normalize_category(raw):
             return parent
     return None
 
-normalized = _normalize_category(c)
-if normalized:
-    category = normalized
-elif c in _DETECT_ITEM_ALLOWED_CATEGORIES:
+if c in _DETECT_ITEM_ALLOWED_CATEGORIES:
     category = c
 
     brand_raw = parsed.get("brand")
