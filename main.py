@@ -347,11 +347,13 @@ def _call_detect_item_model(image_bytes: bytes) -> dict:
     category: Optional[str] = None
     if cat_raw is not None:
         c = str(cat_raw).strip().lower()
-            brand_raw = parsed.get("brand")
+        if c in _DETECT_ITEM_ALLOWED_CATEGORIES:
+            category = c
+
+    brand_raw = parsed.get("brand")
     brand: Optional[str] = None
     if brand_raw is not None:
         b = str(brand_raw).strip()[:200]
-        brand = b if b else None
 
     color_raw = parsed.get("color")
     color: Optional[str] = None
