@@ -18,6 +18,7 @@ import json
 import os
 import re
 import uuid
+from datetime import datetime
 from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -726,6 +727,50 @@ async def detect_item(request: Request, body: DetectPriceRequest) -> JSONRespons
     except Exception as e:
         print(f"[DetectItem] handler error: {e}")
         return JSONResponse(_detect_item_error_dict())
+
+
+@app.post("/redeem-promo")
+async def redeem_promo(request: Request):
+    body = await request.json()
+    code = body.get("code", "").strip().lower()
+    user_id = body.get("userId", "")
+
+    if code != "famandfri":
+        raise HTTPException(status_code=400, detail="Invalid or expired promo code.")
+
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, firestore
+
+        if not firebase_admin._apps:
+            cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+            if cred_path and os.path.isfile(cred_path):
+                firebase_admin.initialize_app(credentials.Certificate(cred_path))
+            else:
+                json_str = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
+                if json_str:
+                    firebase_admin.initialize_app(
+                        credentials.Certificate(json.loads(json_str))
+                    )
+                else:
+                    firebase_admin.initialize_app()
+
+        db = firestore.client()
+        user_ref = db.collection("users").document(user_id)
+        user_doc = user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        user_ref.update({
+            "isPro": True,
+            "promoCode": "Famandfri",
+            "promoRedeemedAt": datetime.utcnow().isoformat()
+        })
+        return {"success": True, "message": "Code applied! Enjoy Pro access."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/scanOutfit", response_model=ScanOutfitResponse)
