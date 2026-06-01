@@ -13,6 +13,7 @@ Response format (per item):
   - x, y, width, height: normalized coordinates in [0, 1] (left, top, width, height)
 """
 
+import asyncio
 import base64
 import json
 import os
@@ -34,7 +35,7 @@ except ImportError:
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -77,6 +78,28 @@ ALLOWED_IMAGE_CONTENT_TYPES = frozenset(
         "image/webp",
     }
 )
+
+# Local background removal (rembg). REMOVE_BG_API_KEY is unused — kept on Railway for rollback only.
+_rembg_session = None
+
+
+def _get_rembg_session():
+    """Lazy-load u2net_cloth_seg session (downloads ~175MB model on first use)."""
+    global _rembg_session
+    if _rembg_session is None:
+        from rembg import new_session
+
+        _rembg_session = new_session("u2net_cloth_seg")
+    return _rembg_session
+
+
+def remove_background(image_bytes: bytes) -> bytes:
+    """Remove image background using local rembg model (u2net_cloth_seg for clothing)."""
+    from rembg import remove as rembg_remove
+
+    session = _get_rembg_session()
+    output_bytes = rembg_remove(image_bytes, session=session)
+    return output_bytes
 
 
 def _rate_limit_key_ip(request: Request) -> str:
@@ -394,6 +417,16 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _warm_rembg_on_startup() -> None:
+    """Pre-load rembg model so first /remove-background request is not cold."""
+    try:
+        await asyncio.to_thread(_get_rembg_session)
+        print("[RemoveBackground] rembg u2net_cloth_seg session ready")
+    except Exception as exc:
+        print(f"[RemoveBackground] rembg warm-up skipped: {exc}")
 
 
 @app.middleware("http")
@@ -727,6 +760,40 @@ async def detect_item(request: Request, body: DetectPriceRequest) -> JSONRespons
     except Exception as e:
         print(f"[DetectItem] handler error: {e}")
         return JSONResponse(_detect_item_error_dict())
+
+
+@app.post("/remove-background")
+@limiter.limit(RATE_LIMIT_IP, key_func=_rate_limit_key_ip)
+@limiter.limit(RATE_LIMIT_USER, key_func=_rate_limit_key_user_or_anon)
+async def remove_background_endpoint(
+    request: Request,
+    image: UploadFile = File(..., alias="image"),
+):
+    """
+    Remove background from a clothing photo; returns PNG with transparent background.
+    Uses local rembg (u2net_cloth_seg), not remove.bg.
+    """
+    if image.filename is not None and len(image.filename) > 255:
+        raise HTTPException(status_code=400, detail="Filename too long")
+
+    mime = _normalize_mime(image.content_type)
+    if mime not in ALLOWED_IMAGE_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported Content-Type. Allowed: {sorted(ALLOWED_IMAGE_CONTENT_TYPES)}",
+        )
+
+    image_bytes = await _read_upload_with_limit(image)
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Empty image upload")
+
+    try:
+        output_bytes = await asyncio.to_thread(remove_background, image_bytes)
+    except Exception as exc:
+        print(f"[RemoveBackground] error: {exc}")
+        raise HTTPException(status_code=500, detail="Background removal failed") from exc
+
+    return Response(content=output_bytes, media_type="image/png")
 
 
 @app.post("/redeem-promo")
