@@ -762,7 +762,8 @@ async def redeem_promo(request: Request):
             raise HTTPException(status_code=404, detail="User not found.")
 
         user_ref.update({
-            "isPro": True,
+            "isPremium": True,
+            "promoUnlocked": True,
             "promoCode": "Famandfri",
             "promoRedeemedAt": datetime.utcnow().isoformat()
         })
