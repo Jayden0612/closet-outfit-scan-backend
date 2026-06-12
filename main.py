@@ -225,6 +225,17 @@ class StyleSearchResponse(BaseModel):
     results: List[StyleSearchResultItem]
 
 
+class ItemSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    user_id: str = Field(..., min_length=1, max_length=128)
+    query: str = Field(..., min_length=1, max_length=300)
+
+
+class ItemSearchResponse(BaseModel):
+    results: List[StyleSearchResultItem]
+
+
 def _detect_price_error_response() -> DetectPriceResponse:
     return DetectPriceResponse(detected_name=None, price=None, confidence="low", source=None)
 
@@ -1183,6 +1194,27 @@ async def style_search(request: Request, body: StyleSearchRequest) -> StyleSearc
     except Exception as e:
         print(f"[StyleSearch] handler error: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/item-search", response_model=ItemSearchResponse)
+@limiter.limit(RATE_LIMIT_IP, key_func=_rate_limit_key_ip)
+@limiter.limit(RATE_LIMIT_USER, key_func=_rate_limit_key_user_or_anon)
+async def item_search(request: Request, body: ItemSearchRequest) -> ItemSearchResponse:
+    print(f"[ItemSearch] POST /item-search hit user_id={body.user_id[:12]}...")
+    search_query = body.query.strip()
+    if not search_query:
+        raise HTTPException(status_code=400, detail="Provide a non-empty query")
+
+    print(f"[ItemSearch] SerpApi search query: {search_query!r}")
+    try:
+        serp_data = _serpapi_style_image_search(search_query)
+        results = _parse_serpapi_image_results(serp_data, search_query)
+    except StyleSearchError as e:
+        # SerpApi is the only image search path — on failure return empty results (no error).
+        print(f"[ItemSearch] SerpApi failed — returning empty results: {e}")
+        return ItemSearchResponse(results=[])
+    print(f"[ItemSearch] Returning {len(results)} image results")
+    return ItemSearchResponse(results=results)
 
 
 @app.post("/wishlist-ai-take", response_model=WishlistAITakeResponse)
