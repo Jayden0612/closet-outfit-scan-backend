@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Backend secrets (Railway / `.env` — never hardcode):
-# OPENAI_API_KEY, ANTHROPIC_API_KEY (style-search vision), GOOGLE_API_KEY (style-search images)
+# OPENAI_API_KEY, ANTHROPIC_API_KEY (style-search vision), SERPAPI_API_KEY (style-search images)
 
 try:
     import cv2
@@ -195,9 +195,8 @@ class RedeemPromoRequest(BaseModel):
     userId: str = Field(..., min_length=1, max_length=128)
 
 
-# --- Style search (image inspiration via Google Custom Search) ---
+# --- Style search (image inspiration via SerpApi Google Images) ---
 STYLE_SEARCH_CLAUDE_MODEL = "claude-sonnet-4-20250514"
-STYLE_SEARCH_GOOGLE_CX = "b3e616581d8204cad"
 MAX_STYLE_SEARCH_B64_CHARS = int(os.getenv("MAX_STYLE_SEARCH_B64_CHARS", str(18 * 1024 * 1024)))
 
 _STYLE_SEARCH_VISION_PROMPT = (
@@ -301,55 +300,57 @@ def _call_style_search_vision(image_bytes: bytes, media_type: str) -> str:
     raise HTTPException(status_code=500, detail="Claude Vision returned no label")
 
 
-def _google_style_image_search(search_query: str) -> List[dict]:
-    api_key = (os.environ.get("GOOGLE_API_KEY") or "").strip()
+class StyleSearchError(Exception):
+    """Raised when the SerpApi image search cannot return results (missing key, HTTP/network error)."""
+
+
+def _serpapi_style_image_search(search_query: str) -> dict:
+    api_key = (os.environ.get("SERPAPI_API_KEY") or "").strip()
     print(
-        f"[StyleSearch] GOOGLE_API_KEY from os.environ: "
+        f"[StyleSearch] SERPAPI_API_KEY from os.environ: "
         f"set={bool(api_key)} len={len(api_key)}"
     )
     if not api_key:
-        raise HTTPException(status_code=500, detail="GOOGLE_API_KEY is not configured")
+        raise StyleSearchError("SERPAPI_API_KEY is not configured")
 
     params = urllib.parse.urlencode(
         {
-            "key": api_key,
-            "cx": STYLE_SEARCH_GOOGLE_CX,
-            "searchType": "image",
+            "engine": "google_images",
             "q": search_query,
+            "api_key": api_key,
             "num": 20,
             "safe": "active",
         }
     )
-    url = f"https://www.googleapis.com/customsearch/v1?{params}"
+    url = f"https://serpapi.com/search.json?{params}"
     # Log full URL with API key redacted (never print the real key).
-    log_url = re.sub(r"([&?])key=[^&]*", r"\1key=***", url)
-    print(f"[StyleSearch] Google Custom Search URL: {log_url}")
+    log_url = re.sub(r"([&?])api_key=[^&]*", r"\1api_key=***", url)
+    print(f"[StyleSearch] SerpApi URL: {log_url}")
     req = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            print(f"[StyleSearch] Google Custom Search response status: {resp.status}")
+            print(f"[StyleSearch] SerpApi response status: {resp.status}")
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        print(f"[StyleSearch] Google Custom Search response status: {e.code}")
         err_body = e.read().decode("utf-8", errors="replace")
-        print(f"[StyleSearch] Google Custom Search error body: {err_body[:800]}")
-        raise HTTPException(status_code=500, detail=f"Google Custom Search error: {err_body}") from e
+        print(f"[StyleSearch] SerpApi response status: {e.code}")
+        print(f"[StyleSearch] SerpApi error body: {err_body[:800]}")
+        raise StyleSearchError(f"SerpApi HTTP {e.code}: {err_body[:300]}") from e
     except urllib.error.URLError as e:
-        print(f"[StyleSearch] Google Custom Search request failed (no HTTP status): {e!s}")
-        raise HTTPException(status_code=500, detail=f"Google Custom Search error: {e!s}") from e
+        print(f"[StyleSearch] SerpApi request failed (no HTTP status): {e!s}")
+        raise StyleSearchError(f"SerpApi request failed: {e!s}") from e
 
 
-def _parse_google_image_results(data: dict, item_identified: str) -> List[StyleSearchResultItem]:
-    items = data.get("items") or []
+def _parse_serpapi_image_results(data: dict, item_identified: str) -> List[StyleSearchResultItem]:
+    items = data.get("images_results") or []
     results: List[StyleSearchResultItem] = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        image_meta = item.get("image") if isinstance(item.get("image"), dict) else {}
-        image_url = str(item.get("link") or image_meta.get("thumbnailLink") or "").strip()
+        image_url = str(item.get("original") or item.get("thumbnail") or "").strip()
         if not image_url:
             continue
-        source_url = str(image_meta.get("contextLink") or item.get("displayLink") or image_url).strip()
+        source_url = str(item.get("link") or item.get("source") or image_url).strip()
         title = str(item.get("title") or "").strip()[:500]
         results.append(
             StyleSearchResultItem(
@@ -1166,9 +1167,15 @@ async def style_search(request: Request, body: StyleSearchRequest) -> StyleSearc
             item_identified = query_text
 
         search_query = f"{item_identified} outfit ideas how to style"
-        print(f"[StyleSearch] Google search query: {search_query!r}")
-        google_data = _google_style_image_search(search_query)
-        results = _parse_google_image_results(google_data, item_identified)
+        print(f"[StyleSearch] SerpApi search query: {search_query!r}")
+        try:
+            serp_data = _serpapi_style_image_search(search_query)
+            results = _parse_serpapi_image_results(serp_data, item_identified)
+        except StyleSearchError as e:
+            # SerpApi is the only image search path — no Google fallback. On failure, return
+            # an empty result set so the feature degrades gracefully instead of erroring out.
+            print(f"[StyleSearch] SerpApi failed — returning empty results: {e}")
+            return StyleSearchResponse(results=[])
         print(f"[StyleSearch] Returning {len(results)} image results")
         return StyleSearchResponse(results=results)
     except HTTPException:
@@ -1322,81 +1329,3 @@ async def scan_tag(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-class StyleSearchRequest(BaseModel):
-    user_id: str
-    query: Optional[str] = None
-    image_base64: Optional[str] = None
-
-@app.post("/style-search")
-async def style_search(request: StyleSearchRequest):
-    try:
-        if not request.query and not request.image_base64:
-            raise HTTPException(status_code=400, detail="Provide a query or image_base64")
-
-        item_label = request.query
-
-        if request.image_base64:
-            image_data = request.image_base64
-            if "," in image_data:
-                image_data = image_data.split(",")[1]
-
-            vision_response = anthropic_client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=100,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_data
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": "Identify the clothing item in this image. Return only a short descriptive label like 'oversized yellow linen shirt' or 'white leather sneakers'. Be specific about color, fit, and material if visible."
-                        }
-                    ]
-                }]
-            )
-            item_label = vision_response.content[0].text.strip()
-
-        search_query = f"{item_label} outfit ideas how to style"
-        api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
-
-        if not api_key:
-            raise HTTPException(status_code=500, detail="GOOGLE_API_KEY is not configured")
-
-        params = {
-            "key": api_key,
-            "cx": "b3e616581d8204cad",
-            "searchType": "image",
-            "q": search_query,
-            "num": 20,
-            "safe": "active"
-        }
-
-        google_response = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params=params
-        )
-        google_response.raise_for_status()
-        data = google_response.json()
-
-        results = []
-        for item in data.get("items", []):
-            results.append({
-                "image_url": item.get("link", ""),
-                "source_url": item.get("image", {}).get("contextLink", ""),
-                "title": item.get("title", ""),
-                "item_identified": item_label
-            })
-
-        return {"results": results}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
