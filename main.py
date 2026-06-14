@@ -165,6 +165,25 @@ class DetectPriceResponse(BaseModel):
     source: Optional[str] = None
 
 
+class ReceiptScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    user_id: str = Field(..., max_length=200)
+    image_base64: str = Field(..., min_length=1, max_length=MAX_DETECT_PRICE_B64_CHARS)
+
+
+class ReceiptScanItem(BaseModel):
+    name: str
+    brand: Optional[str] = None
+    price: Optional[float] = None
+    category: str
+
+
+class ReceiptScanResponse(BaseModel):
+    store_name: Optional[str] = None
+    items: List[ReceiptScanItem] = Field(default_factory=list)
+
+
 class WishlistWardrobeItem(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -521,6 +540,122 @@ def _normalize_detect_item_category(raw: object) -> Optional[str]:
     if c in _DETECT_ITEM_ALLOWED_CATEGORIES:
         return c
     return _DETECT_ITEM_CATEGORY_SYNONYMS.get(c)
+
+
+_SCAN_RECEIPT_SYSTEM = """You are a receipt scanner for a wardrobe app. The user will send you a photo of a shopping receipt or order confirmation.
+
+Your job:
+- Identify the store/retailer name if it is visible on the receipt.
+- Extract ONLY clothing/apparel line items. Ignore tax, subtotal, total, discounts, shipping, gift cards, and clearly non-apparel products (food, electronics, etc.). When an item is borderline (e.g. a hat, belt, bag, scarf, jewelry), include it with category "accessory".
+- For each clothing item, return its name, brand, price, and category.
+
+Rules:
+- name: the product name as printed on the receipt, cleaned up to be human-readable (e.g. "Quarter Zip Pullover"). Never null.
+- brand: the item's brand if discernible. If no item-specific brand is visible, fall back to the store/retailer name. Use null only if nothing is determinable.
+- price: the line item price as a number in USD (e.g. 49.99). Use null if the price is illegible or missing. Do not include currency symbols.
+- category: MUST be exactly one of these five strings only: "top", "bottom", "shoes", "outerwear", "accessory". Map subtypes to the parent bucket (pants → "bottom", sneakers → "shoes", jacket → "outerwear", hat/belt/bag → "accessory").
+
+Respond with ONLY raw valid JSON, no markdown and no preamble, in exactly this shape:
+{
+  "store_name": "Nike" or null,
+  "items": [
+    {"name": "Quarter Zip Pullover", "brand": "Nike", "price": 49.99, "category": "top"}
+  ]
+}
+If you cannot find any clothing line items, return {"store_name": <name or null>, "items": []}."""
+
+
+def _call_scan_receipt_model(image_bytes: bytes) -> dict:
+    """Returns {store_name, items:[{name, brand, price, category}]} parsed from a receipt photo.
+
+    Reuses the same OpenAI vision pattern as /detect-item. Raises ValueError on unusable output."""
+    client = _get_openai_client()
+    if client is None:
+        raise ValueError("vision client unavailable")
+
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    try:
+        completion = client.chat.completions.create(
+            model=os.getenv("DETECT_PRICE_MODEL", "gpt-4o"),
+            messages=[
+                {"role": "system", "content": _SCAN_RECEIPT_SYSTEM},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_b64}",
+                                "detail": "high",
+                            },
+                        },
+                        {"type": "text", "text": "Extract the clothing items from this receipt."},
+                    ],
+                },
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=1500,
+            temperature=0.1,
+        )
+    except Exception as e:
+        print(f"[ScanReceipt] OpenAI error: {e}")
+        raise ValueError("vision call failed") from e
+
+    raw_content = completion.choices[0].message.content or "{}"
+    try:
+        parsed = json.loads(raw_content)
+    except Exception as e:
+        print(f"[ScanReceipt] JSON parse error: {e}")
+        raise ValueError("json parse failed") from e
+
+    if not isinstance(parsed, dict):
+        raise ValueError("unexpected response shape")
+
+    print(f"[ScanReceipt] result: {parsed}")
+
+    store_raw = parsed.get("store_name")
+    store_name: Optional[str] = None
+    if store_raw is not None:
+        s = str(store_raw).strip()[:200]
+        store_name = s if s else None
+
+    items_raw = parsed.get("items")
+    if not isinstance(items_raw, list):
+        items_raw = []
+
+    items: list[dict] = []
+    for entry in items_raw:
+        if not isinstance(entry, dict):
+            continue
+
+        name_raw = entry.get("name")
+        name = str(name_raw).strip()[:300] if name_raw is not None else ""
+        if not name:
+            continue
+
+        category = _normalize_detect_item_category(entry.get("category"))
+        if category is None:
+            category = "accessory"
+
+        brand_raw = entry.get("brand")
+        brand: Optional[str] = None
+        if brand_raw is not None:
+            b = str(brand_raw).strip()[:200]
+            brand = b if b else None
+        if brand is None and store_name:
+            brand = store_name
+
+        price_raw = entry.get("price")
+        try:
+            price = float(price_raw) if price_raw is not None else None
+            if price is not None and (price < 0 or price > 1_000_000):
+                price = None
+        except (TypeError, ValueError):
+            price = None
+
+        items.append({"name": name, "brand": brand, "price": price, "category": category})
+
+    return {"store_name": store_name, "items": items}
 
 _SCAN_TAG_SYSTEM = """You are a fashion tag reader. The user will send you a photo of a clothing tag. Extract all readable information and return ONLY a JSON object with these fields:
 {
@@ -1115,6 +1250,34 @@ async def detect_item(request: Request, body: DetectPriceRequest) -> JSONRespons
     except Exception as e:
         print(f"[DetectItem] handler error: {e}")
         return JSONResponse(_detect_item_error_dict())
+
+
+@app.post("/scan-receipt", response_model=ReceiptScanResponse)
+@limiter.limit(RATE_LIMIT_IP, key_func=_rate_limit_key_ip)
+@limiter.limit(RATE_LIMIT_USER, key_func=_rate_limit_key_user_or_anon)
+async def scan_receipt(request: Request, body: ReceiptScanRequest) -> ReceiptScanResponse:
+    """
+    Extract clothing line items (and the retailer name) from a receipt/order photo.
+    Reuses the same OpenAI vision pattern as /detect-item.
+    """
+    if not body.image_base64:
+        raise HTTPException(status_code=400, detail="No image provided")
+
+    try:
+        raw = base64.b64decode(body.image_base64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="No image provided")
+    if not raw or len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="No image provided")
+
+    try:
+        result = _call_scan_receipt_model(raw)
+        return ReceiptScanResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ScanReceipt] handler error: {e}")
+        raise HTTPException(status_code=500, detail="Could not read receipt")
 
 
 @app.post("/redeem-promo")
